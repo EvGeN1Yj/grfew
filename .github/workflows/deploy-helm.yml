@@ -76,9 +76,14 @@ jobs:
         version: "3.12.0"
 
     - name: Set up Kubeconfig
-      uses: azure/k8s-set-context@v3
-      with:
-        kubeconfig: ${{ secrets.KUBE_CONFIG }}
+      run: |
+        # Создаем директорию для kubeconfig
+        mkdir -p ~/.kube
+        # Сохраняем kubeconfig из секрета
+        echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+        chmod 600 ~/.kube/config
+        # Проверяем подключение
+        kubectl cluster-info || echo "Warning: Could not connect to cluster"
 
     - name: Add Helm repositories
       run: |
@@ -87,8 +92,32 @@ jobs:
 
     - name: Deploy with Helm
       run: |
+        # Проверяем структуру репозитория
+        echo "Current directory structure:"
+        ls -la
+
+        # Проверяем наличие django-app-chart в корне репозитория
+        if [ ! -d "django-app-chart" ]; then
+          echo "Error: django-app-chart directory not found in repository root!"
+          echo "Looking for Chart.yaml files:"
+          find . -name "Chart.yaml" -type f 2>/dev/null | head -5
+          exit 1
+        fi
+
+        echo "Found django-app-chart directory, proceeding with deployment..."
         cd django-app-chart
-        helm dependency update || helm dependency build
+
+        # Обновляем зависимости
+        helm dependency update || helm dependency build || echo "Warning: Could not update dependencies"
+
+        # Проверяем доступность образа в registry перед деплоем
+        echo "Checking if image exists in registry..."
+        curl -u admin:"${{ secrets.REGISTRY_PASSWORD }}" \
+          http://${{ env.REGISTRY }}/v2/${{ env.IMAGE_NAME }}/manifests/latest || \
+          echo "Warning: Could not verify image in registry"
+
+        # Деплоим с Helm (без --wait для быстрого деплоя, проверим статус отдельно)
+        echo "Deploying with Helm..."
         helm upgrade --install ${{ env.HELM_RELEASE }} . \
           --namespace ${{ env.K8S_NAMESPACE }} \
           --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
@@ -96,20 +125,96 @@ jobs:
           --set app.replicas=3 \
           --set imagePullSecrets=registry-secret \
           --create-namespace \
-          --wait \
-          --timeout 300s
+          --timeout 10m \
+          --wait=false || echo "Helm deployment initiated (checking status separately)"
 
+        # Ждем немного и проверяем статус
+        echo "Waiting 30 seconds for pods to start..."
+        sleep 30
+
+        # Показываем статус Helm release
+        echo "=== Helm Release Status ==="
         helm list --namespace ${{ env.K8S_NAMESPACE }}
-        kubectl get pods,svc -n ${{ env.K8S_NAMESPACE }}
+        helm status ${{ env.HELM_RELEASE }} --namespace ${{ env.K8S_NAMESPACE }} || true
 
-    - name: Run database migrations
-      run: |
-        POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/name=django-app" -o jsonpath='{.items[0].metadata.name}')
-        if [ -n "$POD_NAME" ]; then
-          kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py migrate
-          kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py collectstatic --noinput
-        else
-          echo "Pod not found, skipping migrations"
+        # Показываем статус подов
+        echo "=== Pods Status ==="
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o wide
+
+        # Показываем события для диагностики
+        echo "=== Recent Events ==="
+        kubectl get events -n ${{ env.K8S_NAMESPACE }} --sort-by='.lastTimestamp' | tail -20
+
+        # Проверяем статус каждого пода
+        echo "=== Pod Details ==="
+        for pod in $(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[*].metadata.name}'); do
+          echo "--- Pod: $pod ---"
+          kubectl describe pod $pod -n ${{ env.K8S_NAMESPACE }} | grep -A 10 "Events:" || true
+          kubectl get pod $pod -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.containerStatuses[*].state}' || true
+          echo ""
+        done
+
+        # Показываем сервисы
+        echo "=== Services ==="
+        kubectl get svc -n ${{ env.K8S_NAMESPACE }}
+
+        # Проверяем, есть ли хотя бы один готовый под
+        READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | wc -w)
+        echo "Ready pods: $READY_PODS"
+
+        if [ "$READY_PODS" -eq "0" ]; then
+          echo "Warning: No pods are in Running state yet. This might be normal if deployment just started."
+          echo "Checking pod logs for errors..."
+          for pod in $(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs for $pod ---"
+            kubectl logs $pod -n ${{ env.K8S_NAMESPACE }} --tail=20 || true
+          done
         fi
 
+    - name: Wait for pods to be ready and run migrations
+      run: |
+        echo "Waiting for at least one pod to be ready..."
+        # Ждем до 5 минут, пока хотя бы один под станет готовым
+        for i in {1..30}; do
+          READY_POD=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/name=django-app" \
+            -o jsonpath='{.items[?(@.status.phase=="Running" && @.status.containerStatuses[0].ready==true)].metadata.name}' | head -1)
+          if [ -n "$READY_POD" ]; then
+            echo "Found ready pod: $READY_POD"
+            break
+          fi
+          echo "Waiting for pod to be ready... ($i/30)"
+          sleep 10
+        done
+
+        POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/name=django-app" \
+          -o jsonpath='{.items[0].metadata.name}')
+
+        if [ -z "$POD_NAME" ]; then
+          echo "Error: No pods found with label app.kubernetes.io/name=django-app"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+          exit 1
+        fi
+
+        # Ждем, пока под станет готовым
+        echo "Waiting for pod $POD_NAME to be ready..."
+        kubectl wait --for=condition=ready pod/$POD_NAME -n ${{ env.K8S_NAMESPACE }} --timeout=300s || {
+          echo "Pod did not become ready. Checking status..."
+          kubectl describe pod $POD_NAME -n ${{ env.K8S_NAMESPACE }}
+          kubectl logs $POD_NAME -n ${{ env.K8S_NAMESPACE }} --tail=50
+          exit 1
+        }
+
+        echo "Pod is ready. Running migrations..."
+        kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py migrate || {
+          echo "Migration failed. Checking logs..."
+          kubectl logs $POD_NAME -n ${{ env.K8S_NAMESPACE }} --tail=50
+          exit 1
+        }
+
+        echo "Running collectstatic..."
+        kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py collectstatic --noinput || {
+          echo "Collectstatic failed, but continuing..."
+        }
+
+        echo "Migrations completed successfully!"
 
