@@ -19,19 +19,49 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to private registry
+    - name: Install skopeo for insecure registry
       run: |
-        echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY }} -u admin --password-stdin
+        # Устанавливаем skopeo для работы с insecure registry
+        sudo apt-get update
+        sudo apt-get install -y skopeo
 
-    - name: Build and push Docker image
+    - name: Build Docker image
       uses: docker/build-push-action@v5
       with:
-        context: .
+        context: ./django-kubernetes-app
         platforms: linux/amd64
-        push: true
+        push: false
+        load: true
         tags: |
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+        cache-to: type=inline
+
+    - name: Push to insecure registry using skopeo
+      run: |
+        # Используем skopeo для push в insecure HTTP registry
+        REGISTRY="${{ env.REGISTRY }}"
+        IMAGE_NAME="${{ env.IMAGE_NAME }}"
+        SHA="${{ github.sha }}"
+
+        # Сохраняем образ в tar
+        docker save ${REGISTRY}/${IMAGE_NAME}:latest > /tmp/image-latest.tar
+        docker save ${REGISTRY}/${IMAGE_NAME}:${SHA} > /tmp/image-sha.tar
+
+        # Пушим через skopeo с insecure опцией
+        skopeo copy --dest-tls-verify=false \
+          docker-archive:/tmp/image-latest.tar \
+          docker://${REGISTRY}/${IMAGE_NAME}:latest \
+          --dest-creds=admin:"${{ secrets.REGISTRY_PASSWORD }}"
+
+        skopeo copy --dest-tls-verify=false \
+          docker-archive:/tmp/image-sha.tar \
+          docker://${REGISTRY}/${IMAGE_NAME}:${SHA} \
+          --dest-creds=admin:"${{ secrets.REGISTRY_PASSWORD }}"
+
+        # Очищаем временные файлы
+        rm -f /tmp/image-*.tar
 
   deploy-with-helm:
     needs: build-and-push
@@ -53,18 +83,18 @@ jobs:
     - name: Add Helm repositories
       run: |
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-        helm repo add bitnami https://charts.bitnami.com/bitnami
         helm repo update
 
     - name: Deploy with Helm
       run: |
         cd django-app-chart
-        helm dependency update
+        helm dependency update || helm dependency build
         helm upgrade --install ${{ env.HELM_RELEASE }} . \
           --namespace ${{ env.K8S_NAMESPACE }} \
           --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
           --set image.tag=latest \
           --set app.replicas=3 \
+          --set imagePullSecrets=registry-secret \
           --create-namespace \
           --wait \
           --timeout 300s
@@ -75,5 +105,10 @@ jobs:
     - name: Run database migrations
       run: |
         POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/name=django-app" -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py migrate
-        kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py collectstatic --noinput
+        if [ -n "$POD_NAME" ]; then
+          kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py migrate
+          kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py collectstatic --noinput
+        else
+          echo "Pod not found, skipping migrations"
+        fi
+
