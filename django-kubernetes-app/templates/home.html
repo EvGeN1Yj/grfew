@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Django Kubernetes App - Load Balancing Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 900px;
+            width: 100%;
+            padding: 40px;
+            animation: fadeIn 0.5s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        h1 {
+            color: #667eea;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+
+        .status-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+            margin-bottom: 30px;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .info-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .info-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .info-card h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .info-card .value {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #2d3748;
+            word-break: break-all;
+        }
+
+        .pod-info {
+            background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            border-left: 5px solid #f39c12;
+        }
+
+        .pod-info h2 {
+            color: #d35400;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+
+        .pod-name {
+            font-family: 'Courier New', monospace;
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 1.2em;
+            color: #2d3748;
+            margin-bottom: 10px;
+            word-break: break-all;
+        }
+
+        .refresh-btn {
+            display: block;
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            margin-top: 20px;
+        }
+
+        .refresh-btn:hover {
+            transform: scale(1.02);
+        }
+
+        .refresh-btn:active {
+            transform: scale(0.98);
+        }
+
+        .timestamp {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 20px;
+        }
+
+        .instructions {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 15px;
+            margin-top: 30px;
+            border-left: 5px solid #2196f3;
+        }
+
+        .instructions h3 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+
+        .instructions p {
+            color: #555;
+            line-height: 1.6;
+            margin-bottom: 5px;
+        }
+
+        .instructions code {
+            background: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #d32f2f;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Django Kubernetes App</h1>
+        <p class="subtitle">Демонстрация балансировки нагрузки</p>
+
+        <div style="text-align: center;">
+            <span class="status-badge">● Running</span>
+        </div>
+
+        <div class="pod-info">
+            <h2>📦 Текущий Pod</h2>
+            <div class="pod-name">{{ hostname }}</div>
+            <p style="color: #555; margin-top: 10px;">
+                <strong>IP:</strong> {{ pod_ip }}
+            </p>
+        </div>
+
+        <div class="info-grid">
+            <div class="info-card">
+                <h3>Hostname</h3>
+                <div class="value">{{ hostname }}</div>
+            </div>
+
+            <div class="info-card">
+                <h3>Pod IP</h3>
+                <div class="value">{{ pod_ip }}</div>
+            </div>
+
+            <div class="info-card">
+                <h3>Database Host</h3>
+                <div class="value">{{ db_host }}</div>
+            </div>
+
+            <div class="info-card">
+                <h3>Database Name</h3>
+                <div class="value">{{ db_name }}</div>
+            </div>
+        </div>
+
+        <button class="refresh-btn" onclick="location.reload()">
+            🔄 Обновить страницу (проверить балансировку)
+        </button>
+
+        <div class="timestamp">
+            Последнее обновление: {{ timestamp }}
+        </div>
+
+        <div class="instructions">
+            <h3>💡 Как проверить балансировку нагрузки:</h3>
+            <p>1. Обновляйте страницу несколько раз (F5 или кнопка выше)</p>
+            <p>2. Обратите внимание на изменение <strong>Hostname</strong> в карточке "Текущий Pod"</p>
+            <p>3. Разные hostname'ы означают, что запросы обрабатываются разными подами</p>
+            <p>4. Или используйте команду: <code>curl http://YOUR_IP:32191/</code></p>
+        </div>
+    </div>
+</body>
+</html>
+
