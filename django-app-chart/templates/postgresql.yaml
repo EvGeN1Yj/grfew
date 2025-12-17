@@ -1,18 +1,16 @@
 {{- if .Values.postgresql.enabled }}
+---
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Secret
 metadata:
-  name: {{ .Release.Name }}-postgresql-pvc
+  name: {{ .Release.Name }}-postgresql
   namespace: {{ .Values.global.namespace }}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: {{ .Values.postgresql.persistence.size | default "5Gi" }}
+type: Opaque
+data:
+  postgres-password: {{ .Values.postgresql.auth.password | b64enc | quote }}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-postgresql
   namespace: {{ .Values.global.namespace }}
@@ -20,6 +18,7 @@ metadata:
     app: postgresql
     release: {{ .Release.Name }}
 spec:
+  serviceName: {{ .Release.Name }}-postgresql
   replicas: 1
   selector:
     matchLabels:
@@ -43,7 +42,10 @@ spec:
         - name: POSTGRES_USER
           value: {{ .Values.postgresql.auth.username | quote }}
         - name: POSTGRES_PASSWORD
-          value: {{ .Values.postgresql.auth.password | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-postgresql
+              key: postgres-password
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
         volumeMounts:
@@ -56,10 +58,15 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
-      volumes:
-      - name: postgresql-storage
-        persistentVolumeClaim:
-          claimName: {{ .Release.Name }}-postgresql-pvc
+  volumeClaimTemplates:
+  - metadata:
+      name: postgresql-storage
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: {{ .Values.postgresql.persistence.size | default "5Gi" }}
 ---
 apiVersion: v1
 kind: Service
@@ -70,25 +77,13 @@ metadata:
     app: postgresql
     release: {{ .Release.Name }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.postgresql.service.type | default "ClusterIP" }}
   ports:
-  - port: 5432
+  - port: {{ .Values.postgresql.service.port | default 5432 }}
     targetPort: 5432
     protocol: TCP
     name: postgresql
   selector:
     app: postgresql
     release: {{ .Release.Name }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ .Release.Name }}-postgresql
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    app: postgresql
-    release: {{ .Release.Name }}
-type: Opaque
-stringData:
-  password: {{ .Values.postgresql.auth.password | quote }}
 {{- end }}

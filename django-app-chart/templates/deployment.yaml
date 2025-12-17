@@ -35,7 +35,7 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ .Release.Name }}-postgresql
-              key: password
+              key: postgres-password
         - name: DB_HOST
           value: {{ printf "%s-postgresql" .Release.Name | quote }}
         - name: DB_PORT

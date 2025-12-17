@@ -4,4 +4,3 @@ description: A Django application with PostgreSQL
 type: application
 version: 0.1.0
 appVersion: "1.0.0"
-# PostgreSQL теперь встроенный через template, не зависимость

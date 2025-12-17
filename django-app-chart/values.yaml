@@ -4,7 +4,7 @@ global:
 
 # Image settings
 image:
-  repository: "77.232.36.136:30500/django-app"  # Замените на ваш IP
+  repository: "77.232.36.136:30500/django-app"
   tag: "latest"
   pullPolicy: IfNotPresent
 
@@ -30,7 +30,6 @@ resources:
 env:
   DEBUG: "False"
   ALLOWED_HOSTS: "*"
-  DB_HOST: "{{ .Release.Name }}-postgresql"
 
 # Ingress configuration
 ingress:
@@ -43,7 +42,7 @@ ingress:
           pathType: Prefix
   tls: []
 
-# PostgreSQL configuration (from Bitnami chart)
+# PostgreSQL configuration (встроенный template)
 postgresql:
   enabled: true
   auth:
@@ -56,6 +55,9 @@ postgresql:
   service:
     type: ClusterIP
     port: 5432
+  image:
+    repository: postgres
+    tag: "13"
 
 # Monitoring configuration
 monitoring:
@@ -68,10 +70,3 @@ vault:
   enabled: false
   address: "http://vault.vault.svc.cluster.local:8200"
   secretPath: "secret/data/django-app"
-
-
-# Настройки образа PostgreSQL (для встроенного template)
-postgresql:
-  image:
-    repository: postgres
-    tag: "13"
